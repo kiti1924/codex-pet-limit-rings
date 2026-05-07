@@ -361,6 +361,7 @@ struct LimitRingRenderer {
 
     private struct LimitReadout {
         var text: String
+        var detailText: String?
         var ringPoint: CGPoint
         var labelRect: CGRect
         var color: NSColor
@@ -465,6 +466,7 @@ struct LimitRingRenderer {
         if let primary = state.primary {
             readouts.append(makeReadout(
                 text: formatPercent(primary.remainingPercent),
+                detailText: formatResetCountdown(primary.resetAt),
                 center: center,
                 ringRadius: outerRadius,
                 labelRadius: outerRadius + 22.0,
@@ -477,6 +479,7 @@ struct LimitRingRenderer {
         if let secondary = state.secondary {
             readouts.append(makeReadout(
                 text: formatPercent(secondary.remainingPercent),
+                detailText: formatResetCountdown(secondary.resetAt),
                 center: center,
                 ringRadius: innerRadius,
                 labelRadius: innerRadius + 21.0,
@@ -493,6 +496,7 @@ struct LimitRingRenderer {
 
     private func makeReadout(
         text: String,
+        detailText: String?,
         center: CGPoint,
         ringRadius: CGFloat,
         labelRadius: CGFloat,
@@ -503,7 +507,12 @@ struct LimitRingRenderer {
         let angle = -CGFloat.pi / 2.0 + CGFloat(max(remainingPercent, 1.8) / 100.0) * CGFloat.pi * 2.0
         let ringPoint = point(center: center, radius: ringRadius, angle: angle)
         let labelPoint = point(center: center, radius: labelRadius, angle: angle)
-        let labelSize = CGSize(width: text.count > 3 ? 45 : 38, height: 22)
+        let percentSize = NSAttributedString(string: text, attributes: readoutPercentAttributes()).size()
+        let detailSize = detailText.map { NSAttributedString(string: $0, attributes: readoutDetailAttributes()).size() } ?? .zero
+        let labelSize = CGSize(
+            width: ceil(max(text.count > 3 ? 45.0 : 38.0, percentSize.width + 20.0, detailSize.width + 18.0)),
+            height: detailText == nil ? 22.0 : 34.0
+        )
         var labelRect = CGRect(
             x: labelPoint.x - labelSize.width / 2,
             y: labelPoint.y - labelSize.height / 2,
@@ -511,7 +520,7 @@ struct LimitRingRenderer {
             height: labelSize.height
         )
         labelRect = clamp(labelRect, inside: bounds)
-        return LimitReadout(text: text, ringPoint: ringPoint, labelRect: labelRect, color: color, angle: angle)
+        return LimitReadout(text: text, detailText: detailText, ringPoint: ringPoint, labelRect: labelRect, color: color, angle: angle)
     }
 
     private func resolveReadoutOverlaps(_ readouts: [LimitReadout], bounds: CGRect) -> [LimitReadout] {
@@ -591,13 +600,20 @@ struct LimitRingRenderer {
         context.addPath(path)
         context.strokePath()
 
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedSystemFont(ofSize: 11.5, weight: .semibold),
-            .foregroundColor: NSColor(calibratedWhite: 1.0, alpha: 0.92)
-        ]
-        let attributed = NSAttributedString(string: readout.text, attributes: attrs)
-        let textSize = attributed.size()
-        attributed.draw(at: CGPoint(x: readout.labelRect.midX - textSize.width / 2, y: readout.labelRect.midY - textSize.height / 2 + 0.5))
+        let percent = NSAttributedString(string: readout.text, attributes: readoutPercentAttributes())
+        let percentSize = percent.size()
+
+        if let detailText = readout.detailText {
+            let detail = NSAttributedString(string: detailText, attributes: readoutDetailAttributes())
+            let detailSize = detail.size()
+            let totalHeight = percentSize.height + detailSize.height - 1.0
+            let detailY = readout.labelRect.midY - totalHeight / 2.0 - 0.5
+            let percentY = detailY + detailSize.height - 1.0
+            percent.draw(at: CGPoint(x: readout.labelRect.midX - percentSize.width / 2.0, y: percentY))
+            detail.draw(at: CGPoint(x: readout.labelRect.midX - detailSize.width / 2.0, y: detailY))
+        } else {
+            percent.draw(at: CGPoint(x: readout.labelRect.midX - percentSize.width / 2, y: readout.labelRect.midY - percentSize.height / 2 + 0.5))
+        }
         context.restoreGState()
     }
 
@@ -638,6 +654,60 @@ struct LimitRingRenderer {
             return "\(Int(percent.rounded()))%"
         }
         return String(format: "%.1f%%", percent)
+    }
+
+    private func formatResetCountdown(_ resetAt: TimeInterval?) -> String? {
+        guard var resetAt else { return nil }
+        if resetAt > 10_000_000_000 {
+            resetAt /= 1000.0
+        }
+
+        let seconds = max(0, resetAt - Date().timeIntervalSince1970)
+        if seconds <= 0 {
+            return "soon"
+        }
+        if seconds < 60 {
+            return "<1m"
+        }
+        if seconds >= 2.0 * 24.0 * 60.0 * 60.0 {
+            return "\(Int(ceil(seconds / (24.0 * 60.0 * 60.0))))d"
+        }
+
+        let minutes = Int(ceil(seconds / 60.0))
+        if minutes < 60 {
+            return "\(minutes)m"
+        }
+
+        let hours = minutes / 60
+        let remainingMinutes = minutes % 60
+        if hours < 24 {
+            if hours >= 6 || remainingMinutes == 0 {
+                return "\(hours)h"
+            }
+            return "\(hours)h \(remainingMinutes)m"
+        }
+
+        let days = hours / 24
+        let remainingHours = hours % 24
+        if days >= 7 || remainingHours == 0 {
+            return "\(days)d"
+        }
+        return "\(days)d \(remainingHours)h"
+    }
+
+    private func readoutPercentAttributes() -> [NSAttributedString.Key: Any] {
+        [
+            .font: NSFont.monospacedSystemFont(ofSize: 11.5, weight: .semibold),
+            .foregroundColor: NSColor(calibratedWhite: 1.0, alpha: 0.92)
+        ]
+    }
+
+    private func readoutDetailAttributes() -> [NSAttributedString.Key: Any] {
+        [
+            .font: NSFont.systemFont(ofSize: 9.0, weight: .semibold),
+            .foregroundColor: NSColor(calibratedWhite: 1.0, alpha: 0.64),
+            .kern: -0.35
+        ]
     }
 }
 
